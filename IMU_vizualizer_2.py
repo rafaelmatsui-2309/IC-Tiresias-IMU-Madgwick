@@ -14,12 +14,16 @@ ApplicationGL = False
 
 class PortSettings:
     Name = "COM7"
-    Speed = 9600
+    Speed = 115200
     Timeout = 2
 class IMU:
     Roll = 0
     Pitch = 0
     Yaw = 0
+    W = 1.0
+    X = 0.0
+    Y = 0.0
+    Z = 0.0
 
 
 
@@ -94,6 +98,8 @@ def DrawBoard():
         x += 1
     glEnd()
 
+#DrawGL original]
+"""
 def DrawGL():
 
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
@@ -107,6 +113,51 @@ def DrawGL():
 
     DrawText("Roll: {}°               Pitch: {}°".format(round(myimu.Roll,1),round(myimu.Pitch,1)))
     DrawBoard()
+    pygame.display.flip()
+"""
+#DrawGL novo para mostrar os valores de 
+
+def DrawGL():
+    glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
+    glLoadIdentity() 
+    gluPerspective(90, (display[0]/display[1]), 0.1, 50.0)
+    glTranslatef(0.0, 0.0, -5)   
+
+    glRotatef(myimu.Yaw, 0, 1, 0)
+    glRotatef(myimu.Pitch, 0, 0, 1)
+    glRotatef(myimu.Roll, 1, 0, 0)
+
+    DrawBoard()
+
+    # Reseta a matriz para desenhar texto em posição fixa (HUD)
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    glOrtho(0, display[0], 0, display[1], -1, 1)
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    # Posiciona e desenha cada linha de texto
+    glRasterPos2f(10, display[1] - 30)
+    DrawText("Roll:  {:+.2f} deg".format(myimu.Roll))
+
+    glRasterPos2f(10, display[1] - 60)
+    DrawText("Pitch: {:+.2f} deg".format(myimu.Pitch))
+
+    glRasterPos2f(10, display[1] - 90)
+    DrawText("Yaw:   {:+.2f} deg".format(myimu.Yaw))
+
+    glRasterPos2f(10, 40)
+    DrawText("Q: w={:.3f}  x={:.3f}  y={:.3f}  z={:.3f}".format(
+        myimu.W, myimu.X, myimu.Y, myimu.Z))
+
+    # Restaura matrizes
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+    glPopMatrix()
+
     pygame.display.flip()
 
 def SerialConnection ():
@@ -136,9 +187,42 @@ def quaternion_to_euler(q):
 
     return roll, pitch, yaw
 
-
+# Versão nova
 def ReadData():
     global myimu
+    while True:
+        try:
+            # Drena tudo que está no buffer e pega só o último Q:
+            latest_q_line = None
+            serial_object.timeout = 0.01  # timeout curto
+
+            # Lê todas as linhas disponíveis no buffer
+            while serial_object.in_waiting > 0:
+                line = serial_object.readline().decode(errors='ignore').strip()
+                if line.startswith("Q:"):
+                    latest_q_line = line  # guarda sempre o mais recente
+
+            if latest_q_line:
+                data = latest_q_line[2:].split(',')
+                if len(data) == 4:
+                    q = np.array([float(v) for v in data])
+                    q = q / np.linalg.norm(q)
+                    roll, pitch, yaw = quaternion_to_euler(q)
+                    myimu.Roll = roll
+                    myimu.Pitch = pitch
+                    myimu.Yaw = yaw
+                    myimu.W = q[0]
+                    myimu.X = q[1]
+                    myimu.Y = q[2]
+                    myimu.Z = q[3]
+
+            time.sleep(0.005)  # 200Hz de polling
+
+        except:
+            pass
+
+#Versão original def ReadData():
+    #global myimu
 
     while True:
         try:
@@ -179,7 +263,7 @@ def main():
                     break 
 
                 DrawGL()
-                pygame.time.wait(10)
+                pygame.time.wait(5)
 
         except:
             glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)

@@ -14,11 +14,27 @@
 #define PI 3.14159265359f
 
 // Constantes para filtro Madgwick 
-#define deltat 0.001f                                             // sampling period in seconds (shown as 1 ms)
-#define gyroMeasError 3.14159265358979f * (5.0f / 180.0f)         // gyroscope measurement error in rad/s (shown as 5 deg/s)  
-#define beta sqrt(3.0f / 4.0f) * gyroMeasError                    // compute beta  
+#define deltat 0.01f                                             // Periodo de amostragem (1 ms = 0.001 s)
+#define gyroMeasError 3.14159265358979f * (10.0f / 180.0f)         // erro de medição do giroscópio em rad/s (convertido de 5°/s)  
+//#define beta sqrt(3.0f / 4.0f) * gyroMeasError                    // constante de correção do filtro Madgwick (proporcional ao erro de medição do giroscópio)  
 
-float SEq_1 = 1.0f, SEq_2 = 0.0f, SEq_3 = 0.0f, SEq_4 = 0.0f;     // estimated orientation quaternion elements with initial conditions
+float beta_val = 0.0f;
+#define BETA_MOTION  (sqrt(3.0f / 4.0f) * (3.14159265358979f * (10.0f / 180.0f)))  // movimento normal
+#define BETA_STATIC  0.5f   // parado: acelerômetro corrige forte
+
+float SEq_1 = 1.0f, SEq_2 = 0.0f, SEq_3 = 0.0f, SEq_4 = 0.0f;     // elementos do quaternio de orientação estimada com condições iniciais
+
+//Variáveis de offset
+static float gyr_offset_x = 0.0f;
+static float gyr_offset_y = 0.0f;
+static float gyr_offset_z = 0.0f;
+
+// Valor de thereshold para o gyro
+#define GYRO_THRESHOLD 0.03f  // rad/s
+
+// Acelerômetro filtrado (passa-baixa)
+static float ax_f = 0.0f, ay_f = 0.0f, az_f = 1.0f;
+#define ACC_ALPHA 0.1f  // 0.0 = muito suave, 1.0 = sem filtro — ajuste entre 0.05 e 0.2
 
 
 /*Definido os botões de iniciação e parada*/
@@ -57,7 +73,7 @@ void button_pressed(const struct device *dev,
     }
 }
 
-
+/* Função para botão de iniciar */
 static void button_init(void)
 {
     gpio_pin_configure_dt(&button, GPIO_INPUT);
@@ -83,15 +99,15 @@ static float pitch = 0.0f;
 /*-------Função filtro Madgwick-------*/
 void filterUpdate(float w_x, float w_y, float w_z, float a_x, float a_y, float a_z)
 {
-// Local system variables
+// Variáveis para o filtro Madgwick
 
-    float norm; // vector norm
-    float SEqDot_omega_1, SEqDot_omega_2, SEqDot_omega_3, SEqDot_omega_4; // quaternion derrivative from gyroscopes elements
-    float f_1, f_2, f_3; // objective function elements
-    float J_11or24, J_12or23, J_13or22, J_14or21, J_32, J_33; // objective function Jacobian elements
-    float SEqHatDot_1, SEqHatDot_2, SEqHatDot_3, SEqHatDot_4; // estimated direction of the gyroscope error
+    float norm; // vetor norm
+    float SEqDot_omega_1, SEqDot_omega_2, SEqDot_omega_3, SEqDot_omega_4; // derivada do quaternio medida pelos giroscópios
+    float f_1, f_2, f_3; // elementos da função objetivo
+    float J_11or24, J_12or23, J_13or22, J_14or21, J_32, J_33; // elementos da jacobiana da função objetivo
+    float SEqHatDot_1, SEqHatDot_2, SEqHatDot_3, SEqHatDot_4; // direção estimada do erro do giroscópio
 
-// Axulirary variables to avoid reapeated calcualtions
+// variaveis auxiliares para o evitar calculos repitidos
     float halfSEq_1 = 0.5f * SEq_1;
     float halfSEq_2 = 0.5f * SEq_2;
     float halfSEq_3 = 0.5f * SEq_3;
@@ -100,62 +116,92 @@ void filterUpdate(float w_x, float w_y, float w_z, float a_x, float a_y, float a
     float twoSEq_2 = 2.0f * SEq_2;
     float twoSEq_3 = 2.0f * SEq_3;
 
-// Normalise the accelerometer measurement
+// Normalização das medidas do acelerometro
     norm = sqrt(a_x * a_x + a_y * a_y + a_z * a_z);
     a_x /= norm;
     a_y /= norm;
     a_z /= norm;
 
-// Compute the objective function and Jacobian
+// Calculando os elementos da função objetivo e da jacobiana
     f_1 = twoSEq_2 * SEq_4- twoSEq_1 * SEq_3- a_x;
     f_2 = twoSEq_1 * SEq_2 + twoSEq_3 * SEq_4- a_y;
     f_3 = 1.0f- twoSEq_2 * SEq_2- twoSEq_3 * SEq_3- a_z;
-    J_11or24 = twoSEq_3; // J_11 negated in matrix multiplication
+    J_11or24 = twoSEq_3; // J_11 negado na multiplicação de matrizes
     J_12or23 = 2.0f * SEq_4; 
-    J_13or22 = twoSEq_1; // J_12 negated in matrix multiplication
+    J_13or22 = twoSEq_1; // J_12 negado na multiplicação de matrizes
     J_14or21 = twoSEq_2;
-    J_32 = 2.0f * J_14or21; // negated in matrix multiplication
-    J_33 = 2.0f * J_11or24; // negated in matrix multiplication
+    J_32 = 2.0f * J_14or21; // negado na multiplicação de matrizes
+    J_33 = 2.0f * J_11or24; // negado na multiplicação de matrizes
 
-// Compute the gradient (matrix multiplication)
+// Computando o gradiente (multiplicação de matriz)
     SEqHatDot_1 = J_14or21 * f_2- J_11or24 * f_1;
     SEqHatDot_2 = J_12or23 * f_1 + J_13or22 * f_2- J_32 * f_3;
     SEqHatDot_3 = J_12or23 * f_2- J_33 * f_3- J_13or22 * f_1;
     SEqHatDot_4 = J_14or21 * f_1 + J_11or24 * f_2;
 
-// Normalise the gradient
+// Normalização do gradiente
     norm = sqrt(SEqHatDot_1 * SEqHatDot_1 + SEqHatDot_2 * SEqHatDot_2 + SEqHatDot_3 * SEqHatDot_3 + SEqHatDot_4 * SEqHatDot_4);
     SEqHatDot_1 /= norm;
     SEqHatDot_2 /= norm;
     SEqHatDot_3 /= norm;
     SEqHatDot_4 /= norm;
 
-// Compute the quaternion derrivative measured by gyroscopes
+// Calculando a derrivada do quaternio medida pelo giroscópio
     SEqDot_omega_1 =-halfSEq_2 * w_x- halfSEq_3 * w_y- halfSEq_4 * w_z;
     SEqDot_omega_2 = halfSEq_1 * w_x + halfSEq_3 * w_z- halfSEq_4 * w_y;
     SEqDot_omega_3 = halfSEq_1 * w_y- halfSEq_2 * w_z + halfSEq_4 * w_x;
     SEqDot_omega_4 = halfSEq_1 * w_z + halfSEq_2 * w_y- halfSEq_3 * w_x;
 
-// Compute then integrate the estimated quaternion derrivative
-    SEq_1 += (SEqDot_omega_1- (beta * SEqHatDot_1)) * deltat;
-    SEq_2 += (SEqDot_omega_2- (beta * SEqHatDot_2)) * deltat;
-    SEq_3 += (SEqDot_omega_3- (beta * SEqHatDot_3)) * deltat;
-    SEq_4 += (SEqDot_omega_4- (beta * SEqHatDot_4)) * deltat;
+// Calcula e depois integra a derrivada do quaternio estimada
+    SEq_1 += (SEqDot_omega_1- (beta_val * SEqHatDot_1)) * deltat;
+    SEq_2 += (SEqDot_omega_2- (beta_val * SEqHatDot_2)) * deltat;
+    SEq_3 += (SEqDot_omega_3- (beta_val * SEqHatDot_3)) * deltat;
+    SEq_4 += (SEqDot_omega_4- (beta_val * SEqHatDot_4)) * deltat;
 
-// Normalise quaternion
+// Normalização do quaternio
     norm = sqrt(SEq_1 * SEq_1 + SEq_2 * SEq_2 + SEq_3 * SEq_3 + SEq_4 * SEq_4);
     SEq_1 /= norm;
     SEq_2 /= norm;
     SEq_3 /= norm;
     SEq_4 /= norm;
 }
+/* Função de calibração */ 
+void calibrate_gyro(const struct device *dev)
+{
+    struct sensor_value gyr[3];
+    const int N = 200;
+    float sum_x = 0, sum_y = 0, sum_z = 0;
+
+    printk("Calibrando giroscópio, mantenha o sensor parado...\n");
+
+    for (int i = 0; i < N; i++) {
+        sensor_sample_fetch(dev);
+        sensor_channel_get(dev, SENSOR_CHAN_GYRO_XYZ, gyr);
+        sum_x += sensor_value_to_double(&gyr[0]);
+        sum_y += sensor_value_to_double(&gyr[1]);
+        sum_z += sensor_value_to_double(&gyr[2]);
+        k_sleep(K_MSEC(10));
+    }
+
+    gyr_offset_x = sum_x / N;
+    gyr_offset_y = sum_y / N;
+    gyr_offset_z = sum_z / N;
+
+    printk("Offset: x=%.4f y=%.4f z=%.4f\n",
+           gyr_offset_x, gyr_offset_y, gyr_offset_z);
+}
+
+/*Função de threshold*/
+float deadband(float v) {
+    return (fabsf(v) < GYRO_THRESHOLD) ? 0.0f : v;
+}
+
 
 int main(void)
 {
     const struct device *dev = DEVICE_DT_GET_ONE(bosch_bmi270);
     struct sensor_value acc[3], gyr[3];
     struct sensor_value full_scale_accel, full_scale_gyro, sampling_freq, oversampling;
-    //float SEq_1 = 1.0f, SEq_2 = 0.0f, SEq_3 = 0.0f, SEq_4 = 0.0f;  // estimated orientation quaternion elements with initial conditions
 
 
     printk("Aguardando inicio\n");
@@ -167,7 +213,8 @@ int main(void)
         return 0;
     }
 
-    /* Configurando o sensor */
+    /*------ Configurando o sensor ------*/
+
     /*Acelerometro*/
     full_scale_accel.val1 = 2;  /*(g)*/
     full_scale_accel.val2 = 0;
@@ -193,7 +240,10 @@ int main(void)
     sensor_attr_set(dev, SENSOR_CHAN_GYRO_XYZ,
                     SENSOR_ATTR_SAMPLING_FREQUENCY, &sampling_freq);
 
-    /* === LOOP PRINCIPAL === */
+    calibrate_gyro(dev);
+
+                    
+    /* ------ LOOP PRINCIPAL ------ */
     while (1) {
 
         /* BLOQUEIA SE PAUSADO */
@@ -217,23 +267,31 @@ int main(void)
                gyr[1].val1, gyr[1].val2,
                gyr[2].val1, gyr[2].val2); */
 
-        /* === ACELERÔMETRO (m/s² → g) === 
-        float ax = sensor_value_to_double(&acc[0]) / 9.80665;
-        float ay = sensor_value_to_double(&acc[1]) / 9.80665;
-        float az = sensor_value_to_double(&acc[2]) / 9.80665;
-
-           === GIROSCÓPIO (rad/s → deg/s) === 
-        float gx = sensor_value_to_double(&gyr[0]) * 180.0f / PI;
-        float gy = sensor_value_to_double(&gyr[1]) * 180.0f / PI; */
+      
 
         /* Conversões para o filtro Madgwick */
+
+        /*valores do acelerometro sem filtragem
         float ax = sensor_value_to_double(&acc[0]);
         float ay = sensor_value_to_double(&acc[1]);
-        float az = sensor_value_to_double(&acc[2]);
+        float az = sensor_value_to_double(&acc[2]);*/
 
-        float gx = sensor_value_to_double(&gyr[0]); // rad/s
-        float gy = sensor_value_to_double(&gyr[1]);
-        float gz = sensor_value_to_double(&gyr[2]);
+        float ax_raw = sensor_value_to_double(&acc[0]);
+        float ay_raw = sensor_value_to_double(&acc[1]);
+        float az_raw = sensor_value_to_double(&acc[2]);
+
+        // Passa-baixa exponencial
+        ax_f = ACC_ALPHA * ax_raw + (1.0f - ACC_ALPHA) * ax_f;
+        ay_f = ACC_ALPHA * ay_raw + (1.0f - ACC_ALPHA) * ay_f;
+        az_f = ACC_ALPHA * az_raw + (1.0f - ACC_ALPHA) * az_f;
+
+        float ax = ax_f;
+        float ay = ay_f;
+        float az = az_f;
+
+        float gx = sensor_value_to_double(&gyr[0]) - gyr_offset_x; //rad/s
+        float gy = sensor_value_to_double(&gyr[1]) - gyr_offset_y;         //Subtraindo o offset
+        float gz = sensor_value_to_double(&gyr[2]) - gyr_offset_z;
 
         /* === ÂNGULOS PELO ACELERÔMETRO === */
         float roll_acc  = atan2f(ay, az) * 180.0f / PI;
@@ -245,14 +303,30 @@ int main(void)
 
         /*printk("Roll: %d.%02d deg | Pitch: %d.%02d deg\n\n",
             (int)roll, (int)(fabsf(roll) * 100) % 100,
-            (int)pitch, (int)(fabsf(pitch) * 100) % 100); */   
+            (int)pitch, (int)(fabsf(pitch) * 100) % 100); */
 
-        /* Atualiza o filtro Madgwick */
-        filterUpdate(gx, gy, gz, ax, ay, az);    
+        /*Analisa os valores para verificar threshold*/    
+        gx = deadband(gx);
+        gy = deadband(gy);
+        gz = deadband(gz);
+
+        /* Atualiza o filtro Madgwick checando se o sensor está parado, se sim congela o quaternion*/
+        bool is_static = (gx == 0.0f && gy == 0.0f && gz == 0.0f);
+
+        // Adapta o beta conforme movimento
+        beta_val = is_static ? BETA_STATIC : BETA_MOTION;
+
+        if (!is_static) {
+            filterUpdate(gx, gy, gz, ax, ay, az);
+        }  
 
         printk("Q:%f,%f,%f,%f\n", SEq_1, SEq_2, SEq_3, SEq_4);
+        printk("=====================================\n\n");
+
+        //Teste
+        printk("static=%d beta=%.3f gx=%.4f gy=%.4f gz=%.4f\n", is_static, beta_val, gx, gy, gz);
 
 
-        k_sleep(K_MSEC(1));
+        k_sleep(K_MSEC(10));
     }
 }
